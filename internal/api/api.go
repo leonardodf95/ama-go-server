@@ -75,8 +75,9 @@ func NewHandler(q *pgstore.Queries) http.Handler {
 }
 
 const (
-	MessageKindMessageCreated = "message_created"
-	MessageKindMessageReacted = "message_reaction_increased"
+	MessageKindMessageCreated           = "message_created"
+	MessageKindMessageReactionIncreased = "message_reaction_increased"
+	MessageKindMessageReactionDecreased = "message_reaction_message_decreased"
 )
 
 type MessageMessageCreated struct {
@@ -340,14 +341,70 @@ func (h ApiHandler) handleReactToMessage(w http.ResponseWriter, r *http.Request)
 	w.Write(data)
 
 	go h.NotifyClients(Message{
-		Kind:   MessageKindMessageReacted,
+		Kind:   MessageKindMessageReactionIncreased,
 		Value:  _response{MessageID: rawMessageID, Count: reactions},
 		RoomID: rawRoomID,
 	})
 }
 
 func (h ApiHandler) handleRemoveReactFromMessage(w http.ResponseWriter, r *http.Request) {
+	rawRoomID := chi.URLParam(r, "room_id")
+	roomID, err := uuid.Parse(rawRoomID)
+	if err != nil {
+		http.Error(w, "invalid room id", http.StatusBadRequest)
+		return
+	}
+	rawMessageID := chi.URLParam(r, "message_id")
+	messageID, err := uuid.Parse(rawMessageID)
+	if err != nil {
+		http.Error(w, "invalid message id", http.StatusBadRequest)
+		return
+	}
 
+	_, err = h.q.GetRoom(r.Context(), roomID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "room not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	_, err = h.q.GetMessage(r.Context(), messageID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "message not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	reactions, err := h.q.RemoveReactionFromMessage(r.Context(), messageID)
+
+	if err != nil {
+		slog.Error("failed to remove reaction from message", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	type _response struct {
+		MessageID string `json:"message_id"`
+		Count     int64  `json:"count"`
+	}
+
+	data, _ := json.Marshal(_response{MessageID: rawMessageID, Count: reactions})
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
+
+	go h.NotifyClients(Message{
+		Kind:   MessageKindMessageReactionDecreased,
+		Value:  _response{MessageID: rawMessageID, Count: reactions},
+		RoomID: rawRoomID,
+	})
 }
 
 func (h ApiHandler) handleMarkMessageAsAnswered(w http.ResponseWriter, r *http.Request) {

@@ -209,7 +209,40 @@ func (h ApiHandler) handleCreateRoomMessage(w http.ResponseWriter, r *http.Reque
 }
 
 func (h ApiHandler) handleGetRoomMessages(w http.ResponseWriter, r *http.Request) {
+	rawRoomID := chi.URLParam(r, "room_id")
+	roomID, err := uuid.Parse(rawRoomID)
+	if err != nil {
+		http.Error(w, "invalid room id", http.StatusBadRequest)
+		return
+	}
 
+	_, err = h.q.GetRoom(r.Context(), roomID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "room not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	messages, err := h.q.GetMessages(r.Context(), roomID)
+
+	if err != nil {
+		slog.Error("failed to get messages", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	type _response struct {
+		Messages []pgstore.Message `json:"messages"`
+	}
+
+	data, _ := json.Marshal(_response{Messages: messages})
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
 }
 
 func (h ApiHandler) handleGetRoomMessage(w http.ResponseWriter, r *http.Request) {

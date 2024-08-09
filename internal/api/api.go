@@ -76,6 +76,7 @@ func NewHandler(q *pgstore.Queries) http.Handler {
 
 const (
 	MessageKindMessageCreated = "message_created"
+	MessageKindMessageReacted = "message_reaction_increased"
 )
 
 type MessageMessageCreated struct {
@@ -133,7 +134,6 @@ func (h ApiHandler) handleCreateRoom(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	w.Write(data)
-
 }
 
 func (h ApiHandler) handleGetRooms(w http.ResponseWriter, r *http.Request) {
@@ -287,7 +287,63 @@ func (h ApiHandler) handleGetRoomMessage(w http.ResponseWriter, r *http.Request)
 }
 
 func (h ApiHandler) handleReactToMessage(w http.ResponseWriter, r *http.Request) {
+	rawRoomID := chi.URLParam(r, "room_id")
+	roomID, err := uuid.Parse(rawRoomID)
+	if err != nil {
+		http.Error(w, "invalid room id", http.StatusBadRequest)
+		return
+	}
+	rawMessageID := chi.URLParam(r, "message_id")
+	messageID, err := uuid.Parse(rawMessageID)
+	if err != nil {
+		http.Error(w, "invalid message id", http.StatusBadRequest)
+		return
+	}
 
+	_, err = h.q.GetRoom(r.Context(), roomID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "room not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	_, err = h.q.GetMessage(r.Context(), messageID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "message not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	reactions, err := h.q.ReactToMessage(r.Context(), messageID)
+
+	if err != nil {
+		slog.Error("failed to react to message", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	type _response struct {
+		MessageID string `json:"message_id"`
+		Count     int64  `json:"count"`
+	}
+
+	data, _ := json.Marshal(_response{MessageID: rawMessageID, Count: reactions})
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
+
+	go h.NotifyClients(Message{
+		Kind:   MessageKindMessageReacted,
+		Value:  _response{MessageID: rawMessageID, Count: reactions},
+		RoomID: rawRoomID,
+	})
 }
 
 func (h ApiHandler) handleRemoveReactFromMessage(w http.ResponseWriter, r *http.Request) {

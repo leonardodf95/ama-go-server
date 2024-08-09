@@ -78,6 +78,7 @@ const (
 	MessageKindMessageCreated           = "message_created"
 	MessageKindMessageReactionIncreased = "message_reaction_increased"
 	MessageKindMessageReactionDecreased = "message_reaction_message_decreased"
+	MessageKindMessageAnswered          = "message_answered"
 )
 
 type MessageMessageCreated struct {
@@ -408,7 +409,54 @@ func (h ApiHandler) handleRemoveReactFromMessage(w http.ResponseWriter, r *http.
 }
 
 func (h ApiHandler) handleMarkMessageAsAnswered(w http.ResponseWriter, r *http.Request) {
+	rawRoomID := chi.URLParam(r, "room_id")
+	roomID, err := uuid.Parse(rawRoomID)
+	if err != nil {
+		http.Error(w, "invalid room id", http.StatusBadRequest)
+		return
+	}
+	rawMessageID := chi.URLParam(r, "message_id")
+	messageID, err := uuid.Parse(rawMessageID)
+	if err != nil {
+		http.Error(w, "invalid message id", http.StatusBadRequest)
+		return
+	}
 
+	_, err = h.q.GetRoom(r.Context(), roomID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "room not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	_, err = h.q.GetMessage(r.Context(), messageID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "message not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	err = h.q.MarkMessageAsAnswered(r.Context(), messageID)
+
+	if err != nil {
+		slog.Error("failed to mark message as answered", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+
+	go h.NotifyClients(Message{
+		Kind:   MessageKindMessageAnswered,
+		Value:  rawMessageID,
+		RoomID: rawRoomID,
+	})
 }
 
 func (h ApiHandler) handleSubscribe(w http.ResponseWriter, r *http.Request) {
